@@ -121,4 +121,22 @@ void FrameWorldClipScale(float* x, float* y);
 
 void LogFrameSummary();
 
+// VR: whether the draw FrameBindDrawTargets last placed goes through the world camera (LayerClipScale applied).
+bool FrameLastDrawIsWorldCamera();
+// VR dev trace: whether draws currently go to the composite (UI) layer.
+bool FrameDrawingComposite();
+// VR: world camera draws recorded so far in the frame being recorded (reset at FramePreparePresent).
+uint32_t FrameWorldCameraDraws();
+
+// VR: the image the present blits to the window this frame (a plume::RenderTexture, in SHADER_READ for graphics
+// after FramePreparePresent returned true) and the size of the image in it. Null when there is none.
+void* FramePresentTexture(uint32_t* width, uint32_t* height);
+
+// VR, 3D frame with the HUD separate (esvr::HudSeparate): this frame's world image without the UI (a
+// plume::RenderTexture in SHADER_READ after FramePreparePresent), null otherwise. Valid after FramePreparePresent.
+void* FrameVrWorldTexture(uint32_t* width, uint32_t* height);
+// VR, same frames: the UI target the HUD was drawn into (transparent where there is no UI), in SHADER_READ after
+// FramePreparePresent; its host size. Null otherwise.
+void* FrameVrHudTexture(uint32_t* width, uint32_t* height);
+
 }  // namespace eternalsonata

@@ -529,6 +529,9 @@ set(ETERNALSONATA_SOURCES
     src/gpu/native_renderer_shader_debug.cpp
     src/gpu/native_renderer_state.cpp
     src/gpu/native_renderer_texture.cpp
+    src/vr/esvr_plume.cpp
+    $<$<PLATFORM_ID:Windows>:${CMAKE_SOURCE_DIR}/src/vr/esvr_xr.cpp>
+    $<$<PLATFORM_ID:Windows>:${CMAKE_SOURCE_DIR}/src/vr/esvr_camera.cpp>
     src/core/settings.cpp
     ${ETERNALSONATA_GUEST_SHADER_PACK_ASM}
     ${ETERNALSONATA_GUEST_SHADER_DEBUG_PACK_ASM}
@@ -683,6 +686,8 @@ plume_compile_pixel_shader(eternalsonata
     "${CMAKE_SOURCE_DIR}/src/shaders/blit.frag.hlsl" "blitFrag" "PSMain")
 plume_compile_pixel_shader(eternalsonata
     "${CMAKE_SOURCE_DIR}/src/shaders/blit_present.frag.hlsl" "blitPresentFrag" "PSMain")
+plume_compile_pixel_shader(eternalsonata
+    "${CMAKE_SOURCE_DIR}/src/shaders/blit_over.frag.hlsl" "blitOverFrag" "PSMain")
 
 # The depth resolve, which cannot be a copy now that depth carries stencil.
 plume_compile_vertex_shader(eternalsonata

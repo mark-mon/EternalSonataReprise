@@ -50,6 +50,10 @@ inline constexpr uint32_t kRootPixelBoolConstants = 3;
 // ext/KryptonRecomp/xenos_hlsl.py.
 inline constexpr uint32_t kRootAlphaTest = 4;
 
+// XeEye (b5): which of the draw state's two clip matrices a pass uses. Zero outside VR stereo, which runs the
+// frame's command list once per eye and flips it in between. See esvr_plume.h.
+inline constexpr uint32_t kRootEye = 5;
+
 // The descriptor set indices, which are also the HLSL register spaces the
 // resources are declared in: textures are `t0..t15, space0` and samplers
 // `s0..s15, space1`.

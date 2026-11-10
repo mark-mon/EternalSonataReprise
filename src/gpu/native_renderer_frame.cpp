@@ -2,9 +2,11 @@
 //
 // See native_renderer_frame.h.
 
+#include "../vr/esvr_clip.h"
 #include "native_renderer_frame.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -25,6 +27,7 @@
 #include "shaders/blitVert.hlsl.dxil.h"
 #include "shaders/blitFrag.hlsl.dxil.h"
 #include "shaders/blitPresentFrag.hlsl.dxil.h"
+#include "shaders/blitOverFrag.hlsl.dxil.h"
 #include "shaders/depthResolveVert.hlsl.dxil.h"
 #include "shaders/depthResolveFrag.hlsl.dxil.h"
 #include "shaders/depthResolveMsFrag.hlsl.dxil.h"
@@ -33,6 +36,7 @@
 #include "shaders/blitVert.hlsl.spirv.h"
 #include "shaders/blitFrag.hlsl.spirv.h"
 #include "shaders/blitPresentFrag.hlsl.spirv.h"
+#include "shaders/blitOverFrag.hlsl.spirv.h"
 #include "shaders/depthResolveVert.hlsl.spirv.h"
 #include "shaders/depthResolveFrag.hlsl.spirv.h"
 #include "shaders/depthResolveMsFrag.hlsl.spirv.h"
@@ -372,6 +376,19 @@ GuestLayer g_layer = GuestLayer::kWorld;
 // The blit must not run in that case: there is no world image to bring across,
 // and blitting the previous frame's one would paint garbage over the menu.
 bool g_marker_seen = false;
+
+// VR: this frame's world image when the UI layer was started transparent (esvr::HudSeparate).
+struct VrWorldImage {
+  RenderTexture* texture = nullptr;
+  RenderTextureLayout* layout = nullptr;
+  uint32_t width = 0, height = 0;
+  uint64_t frame = ~0ull;
+} g_vr_world;
+// VR: the UI target the world was kept out of (cleared transparent at the marker). The HUD is taken from it rather
+// than from the final image: in battle the UI is drawn into a band surface and then copied to the screen surface by
+// a shader that writes alpha 1, which would make the HUD panel opaque.
+GuestTarget* g_vr_hud = nullptr;
+uint64_t g_vr_hud_frame = ~0ull;
 // What the previous frame did, which is how a frame knows before its first draw
 // whether it is a menu. A transition between the two is one frame late, and the
 // cost of being wrong is that frame rendered at the other layer's size.
@@ -473,6 +490,9 @@ void RippleNoteTargetCreated(const GuestTarget* target);
 void LayerTrace(const char* what, const GuestTarget* target, uint32_t detail = 0) {
   if (target == nullptr || target->layer != GuestLayer::kComposite || target->base_tile != 0)
     return;
+  if (esvr::TraceFrame())
+    esvr::Log("trace %s composite %ux%u (guest %ux%u) detail %08X", what, target->host_width, target->host_height,
+              target->width, target->height, detail);
   if (g_frame % 300 != 0)
     return;
   REXLOG_DEBUG("native_renderer: layer trace {} on composite {}x{} (guest {}x{} msaa {}) detail {}",
@@ -2692,6 +2712,33 @@ bool CompositeWorldIntoLayer(RenderCommandList* commands, GuestTarget* composite
     return false;
   }
 
+  // VR, 3D frame: the world goes to the eyes on its own and the UI layer starts transparent, so the HUD can be
+  // shown on a panel of its own (esvr_plume.h). The world image is kept (single sampled, FXAA applied) for the
+  // present.
+  if (esvr::HudSeparate()) {
+    const TargetImage world_image = SingleSampled(commands, world);
+    if (world_image.texture != nullptr) {
+      if (NativeRenderFxaa())
+        FxaaInPlace(commands, world_image.texture, *world_image.layout, world->fxaa, world->host_width,
+                    world->host_height);
+      g_vr_world = {world_image.texture, world_image.layout, world->host_width, world->host_height, g_frame};
+      g_vr_hud = composite;
+      g_vr_hud_frame = g_frame;
+      Transition(commands, composite->texture.get(), composite->layout, RenderBarrierStage::GRAPHICS,
+                 RenderTextureLayout::COLOR_WRITE);
+      if (depth && depth->texture)
+        Transition(commands, depth->texture.get(), depth->layout, RenderBarrierStage::GRAPHICS,
+                   RenderTextureLayout::DEPTH_WRITE);
+      BindFramebuffer(commands, framebuffer);
+      commands->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+      if (depth && depth->texture)
+        commands->clearDepthStencil(true, true, 1.0f, 0);
+      composite->composited_frame = g_frame;
+      ++g_layer_composites;
+      return true;
+    }
+  }
+
   const bool same_size =
       world->host_width == composite->host_width && world->host_height == composite->host_height;
 
@@ -2846,7 +2893,8 @@ bool CompositeWorldIntoLayer(RenderCommandList* commands, GuestTarget* composite
 void FrameWorldClipScale(float* x, float* y) {
   *x = 1.0f;
   *y = 1.0f;
-  if (UiLayerDisabled())
+  // VR builds the headset's projection itself (FrameWorldClipMatrix); the guest frustum stays 16:9.
+  if (UiLayerDisabled() || esvr::ClipActive())
     return;
   const uint32_t window_width = g_composite_extent_width;
   const uint32_t window_height = g_composite_extent_height;
@@ -2861,10 +2909,17 @@ void FrameWorldClipScale(float* x, float* y) {
   *y = float(fit * double(extent_height) / double(window_height));
 }
 
+// Whether the last LayerClipScale call was for a draw through the world camera (VR re-aims those), and how many
+// such draws this frame and the last one had (VR: a frame without any is a 2D one, shown flat).
+bool g_world_camera_draw = false;
+uint32_t g_world_camera_draws = 0;
+uint32_t g_world_camera_draws_last = 0;
+
 void LayerClipScale(const GuestTarget* target, float* x, float* y,
                     bool scene_sprite = false) {
   *x = 1.0f;
   *y = 1.0f;
+  g_world_camera_draw = false;
   if (target == nullptr || (target->layer != GuestLayer::kWorld && !scene_sprite))
     return;
   uint32_t extent_width = 0;
@@ -2879,6 +2934,8 @@ void LayerClipScale(const GuestTarget* target, float* x, float* y,
     return;
   // The same `fit` the composite layer frames the UI with, so the two agree to
   // the pixel rather than to the aspect ratio.
+  g_world_camera_draw = true;
+  ++g_world_camera_draws;
   FrameWorldClipScale(x, y);
 }
 
@@ -3389,6 +3446,8 @@ void ApplyPendingExtent() {
 
 bool FramePreparePresent(RenderCommandList* commands) {
   ++g_frame;
+  g_world_camera_draws_last = g_world_camera_draws;
+  g_world_camera_draws = 0;
   ReadbackSettle(g_frame);
   ResolvedTexture* source = g_present_texture;
   PollCaptureKey();
@@ -3424,12 +3483,23 @@ bool FramePreparePresent(RenderCommandList* commands) {
   // pass around a barrier issued inside one.
   Transition(commands, source->texture.get(), source->layout, RenderBarrierStage::GRAPHICS,
              RenderTextureLayout::SHADER_READ);
+  // VR: the separate world image is read by the headset copy after the frame's list.
+  if (g_vr_world.frame == g_frame - 1 && g_vr_world.texture != nullptr)
+    Transition(commands, g_vr_world.texture, *g_vr_world.layout, RenderBarrierStage::GRAPHICS,
+               RenderTextureLayout::SHADER_READ);
+  if (g_vr_hud_frame == g_frame - 1 && g_vr_hud != nullptr && g_vr_hud->texture)
+    Transition(commands, g_vr_hud->texture.get(), g_vr_hud->layout, RenderBarrierStage::GRAPHICS,
+               RenderTextureLayout::SHADER_READ);
 
   const bool linear = !NativeRenderPixelatedScaling();
-  if (g_blit.bound_texture != source->texture.get() || g_blit.bound_linear != linear) {
-    g_blit.bound_texture = source->texture.get();
+  // VR with the HUD separate: the window shows the world (the UI layer holds only the HUD then).
+  RenderTexture* blit_texture = source->texture.get();
+  if (g_vr_world.frame == g_frame - 1 && g_vr_world.texture != nullptr)
+    blit_texture = g_vr_world.texture;
+  if (g_blit.bound_texture != blit_texture || g_blit.bound_linear != linear) {
+    g_blit.bound_texture = blit_texture;
     g_blit.bound_linear = linear;
-    g_blit.descriptor_set->setTexture(0, source->texture.get(), RenderTextureLayout::SHADER_READ);
+    g_blit.descriptor_set->setTexture(0, blit_texture, RenderTextureLayout::SHADER_READ);
     g_blit.descriptor_set->setSampler(
         1, linear ? g_blit.sampler.get() : g_blit.sampler_nearest.get());
   }
@@ -3476,6 +3546,168 @@ void FramePresentGuestImage(RenderCommandList* commands, uint32_t width, uint32_
   commands->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
 
   ++g_composites;
+}
+
+// ---------------------------------------------------------------------------------------------------- VR menu
+struct VrMenu {
+  std::unique_ptr<RenderTexture> texture;
+  std::unique_ptr<RenderFramebuffer> framebuffer;
+  std::unique_ptr<RenderShader> pixel_shader;
+  std::unique_ptr<RenderPipeline> pipeline;  // premultiplied over the window image
+  std::unique_ptr<RenderDescriptorSet> descriptor_set;
+  RenderTextureLayout layout = RenderTextureLayout::UNKNOWN;
+  uint32_t width = 0, height = 0;
+  bool drawn = false;
+  uint32_t box[4] = {};
+  bool failed = false;
+} g_vr_menu;
+
+RenderFramebuffer* FrameVrMenuBegin(RenderCommandList* commands, uint32_t width, uint32_t height) {
+  g_vr_menu.drawn = false;
+  RenderDevice* device = PlumeDevice();
+  if (g_vr_menu.failed || width == 0 || height == 0 || !EnsureBlitResources(device))
+    return nullptr;
+  if (!g_vr_menu.pipeline) {
+    const RenderShaderFormat shader_format = PlumeShaderFormat();
+#ifdef _WIN32
+    if (shader_format == RenderShaderFormat::DXIL)
+      g_vr_menu.pixel_shader = device->createShader(blitOverFragBlobDXIL, sizeof(blitOverFragBlobDXIL), "PSMain",
+                                                    shader_format);
+    else
+#endif
+        if (shader_format == RenderShaderFormat::SPIRV)
+      g_vr_menu.pixel_shader = device->createShader(blitOverFragBlobSPIRV, sizeof(blitOverFragBlobSPIRV),
+                                                    "PSMain", shader_format);
+    if (g_vr_menu.pixel_shader) {
+      RenderGraphicsPipelineDesc pipeline_desc;
+      pipeline_desc.pipelineLayout = g_blit.pipeline_layout.get();
+      pipeline_desc.vertexShader = g_blit.vertex_shader.get();
+      pipeline_desc.pixelShader = g_vr_menu.pixel_shader.get();
+      pipeline_desc.renderTargetFormat[0] = PlumeSwapChainFormat();
+      pipeline_desc.renderTargetCount = 1;
+      RenderBlendDesc blend = RenderBlendDesc::AlphaBlend();
+      blend.srcBlend = RenderBlend::ONE;  // the menu target holds premultiplied colour
+      pipeline_desc.renderTargetBlend[0] = blend;
+      pipeline_desc.cullMode = RenderCullMode::NONE;
+      pipeline_desc.depthEnabled = false;
+      pipeline_desc.depthWriteEnabled = false;
+      pipeline_desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+      g_vr_menu.pipeline = device->createGraphicsPipeline(pipeline_desc);
+    }
+    RenderDescriptorRange ranges[] = {
+        RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, 0, 1),
+        RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, 1, 1),
+    };
+    RenderDescriptorSetDesc descriptor_set_desc(ranges, 2);
+    g_vr_menu.descriptor_set = device->createDescriptorSet(descriptor_set_desc);
+    if (!g_vr_menu.pipeline || !g_vr_menu.descriptor_set) {
+      REXLOG_ERROR("native_renderer: no VR menu pipeline; the overlay stays in the window only");
+      g_vr_menu.failed = true;
+      return nullptr;
+    }
+    g_vr_menu.descriptor_set->setSampler(1, g_blit.sampler_nearest.get());
+  }
+  if (!g_vr_menu.texture || g_vr_menu.width != width || g_vr_menu.height != height) {
+    if (g_vr_menu.framebuffer)
+      RetireBatch().framebuffers.push_back(std::move(g_vr_menu.framebuffer));
+    if (g_vr_menu.texture)
+      RetireBatch().textures.push_back(std::move(g_vr_menu.texture));
+    g_vr_menu.texture = device->createTexture(RenderTextureDesc::ColorTarget(width, height, PlumeSwapChainFormat()));
+    g_vr_menu.layout = RenderTextureLayout::UNKNOWN;
+    if (!g_vr_menu.texture)
+      return nullptr;
+    const RenderTexture* attachment = g_vr_menu.texture.get();
+    RenderFramebufferDesc fb_desc;
+    fb_desc.colorAttachments = &attachment;
+    fb_desc.colorAttachmentsCount = 1;
+    g_vr_menu.framebuffer = device->createFramebuffer(fb_desc);
+    if (!g_vr_menu.framebuffer) {
+      RetireBatch().textures.push_back(std::move(g_vr_menu.texture));
+      return nullptr;
+    }
+    g_vr_menu.width = width;
+    g_vr_menu.height = height;
+    // Safe to rewrite: the present fence has retired every frame that read the old texture through it.
+    g_vr_menu.descriptor_set->setTexture(0, g_vr_menu.texture.get(), RenderTextureLayout::SHADER_READ);
+  }
+  Transition(commands, g_vr_menu.texture.get(), g_vr_menu.layout, RenderBarrierStage::GRAPHICS,
+             RenderTextureLayout::COLOR_WRITE);
+  commands->setFramebuffer(g_vr_menu.framebuffer.get());
+  commands->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
+  commands->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
+  commands->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+  return g_vr_menu.framebuffer.get();
+}
+
+void FrameVrMenuEnd(RenderCommandList* commands, RenderFramebuffer* window, uint32_t width, uint32_t height,
+                    const float* bounds) {
+  Transition(commands, g_vr_menu.texture.get(), g_vr_menu.layout, RenderBarrierStage::GRAPHICS,
+             RenderTextureLayout::SHADER_READ);
+  commands->setFramebuffer(window);
+  commands->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
+  commands->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
+  if (bounds == nullptr)
+    return;
+  // The window keeps showing the overlay too.
+  commands->setPipeline(g_vr_menu.pipeline.get());
+  commands->setGraphicsPipelineLayout(g_blit.pipeline_layout.get());
+  commands->setGraphicsDescriptorSet(g_vr_menu.descriptor_set.get(), 0);
+  const float one = 1.0f;
+  commands->setGraphicsPushConstants(0, &one, 0, sizeof(one));
+  commands->drawInstanced(3, 1, 0, 0);
+  const int32_t x0 = std::clamp(int32_t(std::floor(bounds[0])) - 2, 0, int32_t(width));
+  const int32_t y0 = std::clamp(int32_t(std::floor(bounds[1])) - 2, 0, int32_t(height));
+  const int32_t x1 = std::clamp(int32_t(std::ceil(bounds[2])) + 2, 0, int32_t(width));
+  const int32_t y1 = std::clamp(int32_t(std::ceil(bounds[3])) + 2, 0, int32_t(height));
+  if (x1 <= x0 || y1 <= y0)
+    return;
+  g_vr_menu.box[0] = uint32_t(x0);
+  g_vr_menu.box[1] = uint32_t(y0);
+  g_vr_menu.box[2] = uint32_t(x1 - x0);
+  g_vr_menu.box[3] = uint32_t(y1 - y0);
+  g_vr_menu.drawn = true;
+}
+
+void* FrameVrMenuTexture(uint32_t* x, uint32_t* y, uint32_t* width, uint32_t* height) {
+  if (!g_vr_menu.drawn || !g_vr_menu.texture)
+    return nullptr;
+  *x = g_vr_menu.box[0];
+  *y = g_vr_menu.box[1];
+  *width = g_vr_menu.box[2];
+  *height = g_vr_menu.box[3];
+  return g_vr_menu.texture.get();
+}
+
+bool FrameLastDrawIsWorldCamera() { return g_world_camera_draw; }
+
+bool FrameDrawingComposite() { return g_layer == GuestLayer::kComposite; }
+
+void* FrameVrHudTexture(uint32_t* width, uint32_t* height) {
+  if (g_vr_hud == nullptr || g_vr_hud_frame != g_frame - 1 || !g_vr_hud->texture)
+    return nullptr;
+  *width = g_vr_hud->host_width;
+  *height = g_vr_hud->host_height;
+  return g_vr_hud->texture.get();
+}
+
+uint32_t FrameWorldCameraDraws() { return g_world_camera_draws; }
+
+void* FrameVrWorldTexture(uint32_t* width, uint32_t* height) {
+  // g_frame was counted at FramePreparePresent, after the world image of this frame was kept.
+  if (g_vr_world.texture == nullptr || g_vr_world.frame != g_frame - 1)
+    return nullptr;
+  *width = g_vr_world.width;
+  *height = g_vr_world.height;
+  return g_vr_world.texture;
+}
+
+void* FramePresentTexture(uint32_t* width, uint32_t* height) {
+  ResolvedTexture* source = g_present_texture;
+  if (source == nullptr || !source->texture)
+    return nullptr;
+  *width = source->image_width != 0 ? source->image_width : source->width;
+  *height = source->image_height != 0 ? source->image_height : source->height;
+  return source->texture.get();
 }
 
 RenderFormat FrameColorFormat() { return kColorFormat; }

@@ -33,6 +33,7 @@
 
 #include <plume_render_interface.h>
 #include <rex/ui/ui_drawer.h>
+#include <rex/ui/keybinds.h>
 
 #include "native_renderer_deferred.h"
 #include "native_renderer_draw.h"
@@ -41,6 +42,7 @@
 #include "native_renderer_pipeline.h"
 #include "native_renderer_plume_internal.h"
 #include "native_renderer_profile.h"
+#include "../vr/esvr_plume.h"
 
 REXCVAR_DECLARE(bool, native_deferred_recording);
 
@@ -595,6 +597,10 @@ RenderCommandList* PlumeGuestCommands() {
     return nullptr;
   FrameSlot& slot = g_slots[g_slot];
   RenderCommandList* commands = g_deferred ? g_deferred.get() : slot.command_list.get();
+  // VR stereo records through a forwarding list (esvr_plume.h); the same one for the rest of the list.
+  static RenderCommandList* wrapped = nullptr;
+  if (g_recording && !g_deferred && wrapped != nullptr)
+    return wrapped;
   if (!g_recording) {
     if (g_deferred)
       g_deferred->Open(slot.command_list.get());
@@ -613,6 +619,10 @@ RenderCommandList* PlumeGuestCommands() {
       slot.timer_open = true;
     }
     g_recording = true;
+    if (!g_deferred) {
+      wrapped = esvr::WrapCommands(commands);
+      commands = wrapped;
+    }
     FrameNotifyCommandListBegun();
   }
   return commands;
@@ -668,7 +678,12 @@ bool InitPlumeBackend(void* window_handle, void* window_view) {
   std::string backend = rex::cvar::GetFlagByName("gpu_backend");
   if (const char* api_override = std::getenv("ETERNALSONATA_RENDER_API"))
     backend = api_override;
-  const bool force_vulkan = backend == "vulkan" || backend == "Vulkan" || backend == "vk";
+  bool force_vulkan = backend == "vulkan" || backend == "Vulkan" || backend == "vk";
+  // VR output is D3D12 only (OpenXR on the game's device and direct queue).
+  if (force_vulkan && esvr::VrRequested()) {
+    REXLOG_INFO("native_renderer: VR requested, using D3D12 instead of Vulkan");
+    force_vulkan = false;
+  }
   if (force_vulkan) {
     REXLOG_DEBUG("native_renderer: Vulkan selected over D3D12");
     g_backend.render_interface = CreateVulkanInterface();
@@ -715,6 +730,8 @@ bool InitPlumeBackend(void* window_handle, void* window_view) {
   LoadPipelineCache();
 
   g_backend.queue =g_backend.device->createCommandQueue(RenderCommandListType::DIRECT);
+  if (g_backend.api_name == "D3D12")
+    esvr::InitFromPlume(g_backend.device.get(), g_backend.queue.get());
   for (FrameSlot& slot : g_slots) {
     slot.command_list = g_backend.queue->createCommandList();
     slot.fence = g_backend.device->createCommandFence();
@@ -929,7 +946,12 @@ void PlumePresentFrame() {
 
   // Before FramePreparePresent counts the frame boundary, so the extent this
   // settles on is the one the next frame's draws and resolves both see.
-  FrameNoteWindowExtent(width, height);
+  {
+    // VR mono / stereo: the world is rendered at the headset's eye size, not the window's.
+    uint32_t extent_w = width, extent_h = height;
+    esvr::RenderExtent(&extent_w, &extent_h);
+    FrameNoteWindowExtent(extent_w, extent_h);
+  }
 
   // The guest's image, if it has produced one. Its barrier is appended to the
   // same list the guest's own clears and resolves recorded into, so the present
@@ -960,8 +982,20 @@ void PlumePresentFrame() {
   // command list through the draw context and draws into the image we are about
   // to present.
   if (g_overlay != nullptr) {
+    // VR: L3 + R3 held toggles the gamepad UI mode (the settings), like the ui_mode_button. The bind only sets a
+    // flag the overlay's next draw acts on.
+    if (esvr::TakeMenuToggle())
+      rex::ui::InvokeBind("bind_ui_mode");
+    // VR: the overlay into its own transparent target, which goes to the headset as a panel (and over the window).
+    RenderFramebuffer* menu = esvr::MenuToHeadset() ? FrameVrMenuBegin(commands, width, height) : nullptr;
+    PlumeOverlayBoundsReset();
     PlumeUIDrawContext context(width, height, commands, kSwapChainFormat);
     g_overlay->Draw(context);
+    if (menu != nullptr) {
+      float bounds[4];
+      FrameVrMenuEnd(commands, g_backend.framebuffers[image].get(), width, height,
+                     PlumeOverlayBounds(bounds) ? bounds : nullptr);
+    }
   }
 
   commands->barriers(RenderBarrierStage::NONE,
@@ -974,11 +1008,15 @@ void PlumePresentFrame() {
 
   TextureUploadFlush();
   const RenderCommandList* submit = submitting.command_list.get();
+  // VR stereo: the list runs once for the left eye first.
+  esvr::BeforeFrameSubmit(submitting.command_list.get(), have_guest_image);
   RenderCommandSemaphore* wait = submitting.acquire_semaphore.get();
   RenderCommandSemaphore* signal = g_backend.release_semaphores[image].get();
   g_backend.queue->executeCommandLists(&submit, 1, &wait, 1, &signal, 1, submitting.fence.get());
   submitting.submitted = true;
   submitting.frame_index = recording_frame;
+  // VR: the guest image of this frame into the headset's swapchain, on the same queue right after the frame.
+  esvr::SubmitPresentImage();
   // A failed Present does not top the frame latency semaphore back up either, so
   // it owes the same debt an early return does.
   if (!g_backend.swap_chain->present(image, &signal, 1)) {

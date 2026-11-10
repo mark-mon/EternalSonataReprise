@@ -58,6 +58,11 @@ plume::RenderShaderFormat PlumeShaderFormat();
 // support the guest targets' B8G8R8A8. See kSwapChainFormat.
 plume::RenderFormat PlumeSwapChainFormat();
 
+// VR menu: the box (x0, y0, x1, y1, overlay pixels) of everything the overlay drew since the reset; false when it
+// drew nothing. Overlay thread (the present).
+void PlumeOverlayBoundsReset();
+bool PlumeOverlayBounds(float bounds[4]);
+
 // The command list the guest's rendering records into, begun on demand.
 //
 // The guest does not produce a frame between two calls we control: it clears,
@@ -91,6 +96,17 @@ bool FramePreparePresent(plume::RenderCommandList* commands);
 //
 // Only meaningful after FramePreparePresent returned true; a no-op otherwise.
 void FramePresentGuestImage(plume::RenderCommandList* commands, uint32_t width, uint32_t height);
+
+// VR: the SDK overlay goes to the headset as its own layer, so it is drawn into a transparent target of the
+// window's size instead of the presented image. FrameVrMenuBegin binds and clears it (null: it could not be made,
+// draw into the window as usual); FrameVrMenuEnd binds `window` again and, when `bounds` (PlumeOverlayBounds) is
+// set, draws the menu over the window image too and keeps that box for FrameVrMenuTexture.
+plume::RenderFramebuffer* FrameVrMenuBegin(plume::RenderCommandList* commands, uint32_t width, uint32_t height);
+void FrameVrMenuEnd(plume::RenderCommandList* commands, plume::RenderFramebuffer* window, uint32_t width,
+                    uint32_t height, const float* bounds);
+// This frame's menu (a plume::RenderTexture in SHADER_READ) and the box of it that holds something; null when the
+// overlay drew nothing or was not drawn for the headset.
+void* FrameVrMenuTexture(uint32_t* x, uint32_t* y, uint32_t* width, uint32_t* height);
 
 // Bind the targets the guest currently has bound as the command list's
 // framebuffer, transitioning them if they are not already writable, and hand

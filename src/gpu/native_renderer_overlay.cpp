@@ -422,6 +422,25 @@ bool PlumeImmediateDrawer::UploadGeometry(const rex::ui::ImmediateDrawBatch& bat
   return true;
 }
 
+}  // namespace
+
+float g_overlay_bounds[4] = {1e30f, 1e30f, -1e30f, -1e30f};
+
+void PlumeOverlayBoundsReset() {
+  g_overlay_bounds[0] = g_overlay_bounds[1] = 1e30f;
+  g_overlay_bounds[2] = g_overlay_bounds[3] = -1e30f;
+}
+
+bool PlumeOverlayBounds(float bounds[4]) {
+  if (g_overlay_bounds[2] < g_overlay_bounds[0] || g_overlay_bounds[3] < g_overlay_bounds[1])
+    return false;
+  for (int i = 0; i < 4; ++i)
+    bounds[i] = g_overlay_bounds[i];
+  return true;
+}
+
+namespace {
+
 void PlumeImmediateDrawer::Begin(rex::ui::UIDrawContext& ui_draw_context,
                                  float coordinate_space_width, float coordinate_space_height) {
   ImmediateDrawer::Begin(ui_draw_context, coordinate_space_width, coordinate_space_height);
@@ -464,6 +483,17 @@ void PlumeImmediateDrawer::BeginDrawBatch(const rex::ui::ImmediateDrawBatch& bat
   batch_has_indices_ = false;
   if (commands_ == nullptr || batch.vertex_count <= 0)
     return;
+
+  // VR menu: where the overlay drew this frame (PlumeOverlayBounds), so only that part goes to the headset.
+  if (batch.vertices != nullptr) {
+    for (int i = 0; i < batch.vertex_count; ++i) {
+      const rex::ui::ImmediateVertex& v = batch.vertices[i];
+      g_overlay_bounds[0] = std::min(g_overlay_bounds[0], v.x);
+      g_overlay_bounds[1] = std::min(g_overlay_bounds[1], v.y);
+      g_overlay_bounds[2] = std::max(g_overlay_bounds[2], v.x);
+      g_overlay_bounds[3] = std::max(g_overlay_bounds[3], v.y);
+    }
+  }
 
   if (!UploadGeometry(batch)) {
     commands_ = nullptr;

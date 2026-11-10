@@ -678,6 +678,7 @@ RenderPipelineLayout* EnsureLayout(RenderDevice* device) {
       RenderRootDescriptorDesc(2, kConstantRegisterSpace, RenderRootDescriptorType::CONSTANT_BUFFER),
       RenderRootDescriptorDesc(3, kConstantRegisterSpace, RenderRootDescriptorType::CONSTANT_BUFFER),
       RenderRootDescriptorDesc(4, kConstantRegisterSpace, RenderRootDescriptorType::CONSTANT_BUFFER),
+      RenderRootDescriptorDesc(5, kConstantRegisterSpace, RenderRootDescriptorType::CONSTANT_BUFFER),
   };
 
   RenderPipelineLayoutDesc desc;

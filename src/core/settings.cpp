@@ -22,6 +22,7 @@ extern "C" int EternalSonataGetEffectiveRightTriggerBehavior(void);
 #include "native_renderer.h"
 #include "ui_language.h"
 #include "touch_input_driver.h"
+#include "../vr/esvr_plume.h"
 
 #include <algorithm>
 #include <atomic>
@@ -861,6 +862,15 @@ class CuratedSettingsDialog : public rex::ui::ImGuiDialog {
                           std::span(kActionTimeSteps).first(kActionTimeSteps.size() - 1));
         DrawCvarRow("auto_parry");
         DrawPartyLevelRow();
+        ImGui::EndTabItem();
+      }
+      // VR (vr_config.txt): only when the game was started for a headset.
+      // Selected the first time the dialog opens, since in the headset it is the tab you came for.
+      static bool vr_tab_first = true;
+      if (esvr::VrRequested() &&
+          ImGui::BeginTabItem("VR##vr", nullptr, vr_tab_first ? ImGuiTabItemFlags_SetSelected : 0)) {
+        vr_tab_first = false;
+        esvr::DrawVrSettings();
         ImGui::EndTabItem();
       }
       ImGui::EndTabBar();

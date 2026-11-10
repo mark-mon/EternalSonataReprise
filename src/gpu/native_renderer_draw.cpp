@@ -28,6 +28,8 @@
 #include "native_renderer_readback.h"
 #include "native_renderer_shader_debug.h"
 #include "native_renderer_texture.h"
+#include "../vr/esvr_clip.h"
+#include "../vr/esvr_plume.h"
 
 REXCVAR_DECLARE(bool, native_profile_zones);
 
@@ -354,6 +356,25 @@ Allocation ArenaAllocate(RenderDevice* device, uint64_t bytes) {
   allocation.cpu = created.mapped;
   created.used = aligned;
   return allocation;
+}
+
+// XeEye (b5): VR stereo's buffer that is flipped between the two eye passes (esvr_plume.h), otherwise a zeroed
+// upload slot, one per frame.
+RenderBufferReference EyeConstants(RenderDevice* device) {
+  RenderBufferReference ref;
+  if (esvr::EyeConstants(&ref))
+    return ref;
+  static uint64_t frame = ~0ull;
+  static RenderBufferReference zero;
+  if (frame != FrameIndex() || zero.ref == nullptr) {
+    const Allocation allocation = ArenaAllocate(device, kUploadAlignment);
+    if (!allocation)
+      return zero;
+    std::memset(allocation.cpu, 0, kUploadAlignment);
+    zero = allocation.ref;
+    frame = FrameIndex();
+  }
+  return zero;
 }
 
 // ---------------------------------------------------------------------------
@@ -1703,7 +1724,7 @@ void WaterProbeEndFrame() {
 // 32 words: 14 built state words, then the texture0 scale, then 16 fetch
 // swizzles. The cache compares whole words, so the count must match the
 // cbuffer exactly.
-constexpr size_t kDrawStateWords = 32;
+constexpr size_t kDrawStateWords = 64;  // 32..63: xe_clip_matrix[2] (rows)
 struct DrawStateCache {
   uint32_t words[kDrawStateWords] = {};
   RenderBufferReference buffer;
@@ -2194,10 +2215,19 @@ bool RecordGuestDraw(const GuestDrawCall& call) {
                                         scene_sprite, self_composite,
                                         screen_image && full_viewport) != nullptr;
   }
+  if (esvr::TraceFrame() && FrameDrawingComposite())
+    esvr::Log("trace draw composite vs %d ps %d screen_composite %d self %d image %d fill %d sprite %d count %u "
+              "vp %d,%d %dx%d", draw_vertex_slot, draw_pixel_slot, screen_composite, self_composite, screen_image,
+              screen_fill, scene_sprite, call.count, g_viewport.x, g_viewport.y, g_viewport.width,
+              g_viewport.height);
   if (!have_targets) {
     Drop(kDropNoTarget, "no colour or depth surface is bound, so there is nowhere to draw");
     return false;
   }
+  // VR with the HUD on its own panel: full screen colour fills in the UI layer (battle's 15% black dimming,
+  // bloom setup) would tint the whole panel as a visible rectangle over the world; the panel keeps only the UI.
+  if (screen_fill && FrameDrawingComposite() && esvr::HudSeparate())
+    return true;
   // Only around a change of the MSAA setting, which rebuilds the targets
   // between a draw's pipeline lookup and its binding.
   if (GuestPipelineSamples(call.pipeline) != FrameDrawSampleCount()) {
@@ -2207,9 +2237,11 @@ bool RecordGuestDraw(const GuestDrawCall& call) {
   // Screen fills and full width flat sprites already cover their viewport.
   const bool flat_screen_sprite = draw_vertex_slot >= 0x0d && draw_vertex_slot <= 0x12 &&
       !scene_sprite && !call.host_order_streams && SpansGuestWidth(call);
+  bool world_camera_draw = FrameLastDrawIsWorldCamera();
   if (screen_fill || screen_image || flat_screen_sprite) {
     clip_scale_x = 1.0f;
     clip_scale_y = 1.0f;
+    world_camera_draw = false;
   }
   if (g_probe_armed) {
     g_probe_geometry = fmt::format(
@@ -2882,6 +2914,14 @@ bool RecordGuestDraw(const GuestDrawCall& call) {
     }
     draw_state[16 + stage] = swizzle;
   }
+  {
+    // xe_clip_matrix: identity unless VR re-aims this world camera draw (head pose, eye).
+    float clip_matrix[2][16] = {{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1},
+                                {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}};
+    if (world_camera_draw)
+      esvr::ClipMatrix(clip_matrix);
+    std::memcpy(&draw_state[32], clip_matrix, sizeof(clip_matrix));
+  }
   if (!g_draw_state_cache.valid ||
       std::memcmp(g_draw_state_cache.words, draw_state, sizeof(draw_state)) != 0) {
     const Allocation allocation = ArenaAllocate(device, kUploadAlignment);
@@ -2908,6 +2948,7 @@ bool RecordGuestDraw(const GuestDrawCall& call) {
   commands->setGraphicsRootDescriptor(pixel_floats, kRootPixelFloatConstants);
   commands->setGraphicsRootDescriptor(bool_loops, kRootPixelBoolConstants);
   commands->setGraphicsRootDescriptor(alpha_test, kRootAlphaTest);
+  commands->setGraphicsRootDescriptor(EyeConstants(device), kRootEye);
 
   // The texture mirror.
   //

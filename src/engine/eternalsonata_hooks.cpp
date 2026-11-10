@@ -11,6 +11,7 @@
 
 #include "eternalsonata_hooks_internal.h"
 #include "native_renderer_frame.h"
+#include "../vr/esvr_clip.h"
 #include "overworld_system.h"
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,7 @@ REX_HOOK_RAW(sub_82108878) {
     float clip_x = 1.0f;
     float clip_y = 1.0f;
     eternalsonata::FrameWorldClipScale(&clip_x, &clip_y);
+    esvr::CullClipScale(&clip_x, &clip_y);  // VR: the head turns beyond the game camera's frustum
 
     // Top, bottom, right and left extents at the near plane. Bottom and left
     // are negative, so a plain divide widens them the right way.
