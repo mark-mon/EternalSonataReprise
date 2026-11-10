@@ -287,7 +287,9 @@ class EternalsonataApp : public rex::ReXApp {
     // by the SDK; {platform} is the SDK's own naming (win-amd64 etc.), which
     // is what the CI matrix publishes.
     config.update_asset_format = "eternalsonata-{tag}-{platform}";
-    config.update_repo = "birabittoh/EternalSonataReprise";
+    // VR build: no self-update. An upstream release would replace the exe and rexruntime.dll with the flat
+    // ones and remove VR; with no update_repo the SDK's check (and the settings banner) never runs.
+    config.update_repo.clear();
     // Empty (updater off) unless CMake found a version; see CMakeLists.txt.
     config.game_version = ETERNALSONATA_VERSION;
     // Called after FinishGameDataPaths has latched the picked version.
