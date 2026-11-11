@@ -3,7 +3,8 @@
 	url = https://github.com/birabittoh/plume.git
 [submodule "ext/KryptonRecomp"]
 	path = ext/KryptonRecomp
-	url = https://github.com/birabittoh/KryptonRecomp.git
+	url = https://github.com/mark-mon/KryptonRecomp.git
+	branch = vr
 [submodule "ext/libadrenotools"]
 	path = ext/libadrenotools
 	url = https://github.com/bylaws/libadrenotools.git
