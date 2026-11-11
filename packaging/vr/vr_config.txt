@@ -1,0 +1,25 @@
+# Eternal Sonata VR settings.
+# mode: stereo, mono, theater or off (F8 cycles stereo / mono / theater while playing, F9 recentres)
+mode = stereo
+# render resolution, percent of the headset's recommended eye size
+resolution = 100
+# game units per metre
+world_scale = 1
+# keep the game camera's up / down tilt (0 = level horizon)
+keep_pitch = 0
+# theater screen (and menus) width and distance in metres
+screen_width = 3.2
+screen_distance = 2.5
+# HUD and in-game menus on a panel in front of you (0 = drawn into the eyes): distance, width and
+# height (relative to eye level) in metres; hud_follow = 1 keeps it in front of your head, 0 fixes it
+# in the room in front of where you faced at the last recentre (F9)
+hud = 1
+hud_distance = 1.4
+hud_width = 1.4
+hud_height = -0.1
+hud_follow = 0
+# settings menu (L3 + R3 held, or F4): distance in metres and size (1 = 1 mm per pixel at 1 m)
+menu_distance = 1
+menu_size = 1
+# 0 turns off the scene seen through water
+water_refraction = 1

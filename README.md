@@ -1,5 +1,10 @@
 <img width="829" height="375" alt="logo" src="res/logo.png" />
 
+> **VR fork.** This is the `vr` branch of [mark-mon/EternalSonataReprise](https://github.com/mark-mon/EternalSonataReprise):
+> Eternal Sonata: Reprise with OpenXR VR on Windows (stereo 3D with head tracking, HUD and menus on panels, settings
+> in the headset). See [docs/vr.md](docs/vr.md); releases ship `EternalSonataVR.exe` to put next to the matching
+> Reprise release.
+
 Static recompilation of **Eternal Sonata**.
 
 **You can play with both the Xbox 360 and PS3 versions of the game, no matter the region (PAL, USA or JAP). However, building the actual executable yourself requires the Xbox 360 PAL version of the game.**
