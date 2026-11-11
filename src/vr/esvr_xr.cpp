@@ -88,6 +88,7 @@ void LoadSettings(Settings& t) {
       else if (k == "hud_height") t.hud_height = f;
       else if (k == "hud_follow") t.hud_follow = b;
       else if (k == "menu_distance") t.menu_distance = f;
+      else if (k == "water_refraction") t.water_refraction = b;
       else if (k == "menu_size") t.menu_size = f;
       else if (k == "screen_distance") t.screen_distance = f;
     };
@@ -146,10 +147,12 @@ void SaveConfig() {
                "# in the room in front of where you faced at the last recentre (F9)\n"
                "hud = %d\nhud_distance = %g\nhud_width = %g\nhud_height = %g\nhud_follow = %d\n"
                "# settings menu (L3 + R3 held, or F4): distance in metres and size (1 = 1 mm per pixel at 1 m)\n"
-               "menu_distance = %g\nmenu_size = %g\n",
+               "menu_distance = %g\nmenu_size = %g\n"
+               "# 0 turns off the scene seen through water\nwater_refraction = %d\n",
                t.mode.c_str(), t.resolution, t.world_scale.load(), t.keep_pitch ? 1 : 0, t.screen_width.load(),
                t.screen_distance.load(), t.hud ? 1 : 0, t.hud_distance.load(), t.hud_width.load(), t.hud_height.load(),
-               t.hud_follow ? 1 : 0, t.menu_distance.load(), t.menu_size.load());
+               t.hud_follow ? 1 : 0, t.menu_distance.load(), t.menu_size.load(),
+               t.water_refraction ? 1 : 0);
   std::fclose(f);
   Log("settings saved");
 }
@@ -668,14 +671,40 @@ void LocateViews(XrTime time) {
   }
   EyeViews v;
   v.valid = true;
-  // Dev: ES_VR_FAKE_YAW=<deg> turns head and eyes about the vertical axis (null headset tests).
-  static const float fake_yaw = EnvFloat("ES_VR_FAKE_YAW", 0.0f) * 0.01745329f;
-  auto fake = [](XrPosef p) {
-    if (fake_yaw == 0.0f) return p;
-    Quat r{0, std::sin(fake_yaw * 0.5f), 0, std::cos(fake_yaw * 0.5f)};
+  // Dev (null headset tests): a fake head movement on top of the tracked one. ES_VR_FAKE_YAW=<deg> at start, or
+  // esvr_fake_pose.txt next to the exe, read about twice a second while running: "yaw pitch x y z" (degrees,
+  // metres; yaw left positive, x right, y up, z back), so one session can compare head poses.
+  static float fake_yaw = EnvFloat("ES_VR_FAKE_YAW", 0.0f), fake_pitch = 0.0f;
+  static Vec3 fake_offset{0, 0, 0};
+  static auto next_read = std::chrono::steady_clock::now();
+  if (std::chrono::steady_clock::now() >= next_read) {
+    next_read = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    if (FILE* f = std::fopen((ExeDir() + "esvr_fake_pose.txt").c_str(), "r")) {
+      float y = 0, pt = 0, fx = 0, fy = 0, fz = 0;
+      if (std::fscanf(f, "%f %f %f %f %f", &y, &pt, &fx, &fy, &fz) >= 1 &&
+          (y != fake_yaw || pt != fake_pitch || fx != fake_offset.x || fy != fake_offset.y || fz != fake_offset.z)) {
+        fake_yaw = y;
+        fake_pitch = pt;
+        fake_offset = {fx, fy, fz};
+        Log("fake pose yaw %.1f pitch %.1f offset %.3f %.3f %.3f", y, pt, fx, fy, fz);
+      }
+      std::fclose(f);
+    }
+  }
+  // About the tracked head's position, so a fake turn is a head turn rather than an orbit around the origin.
+  const XrPosef centred_head = Recentre(head.pose);
+  const Vec3 pivot{centred_head.position.x, centred_head.position.y, centred_head.position.z};
+  auto fake = [&](XrPosef p) {
+    if (fake_yaw == 0.0f && fake_pitch == 0.0f && fake_offset.x == 0.0f && fake_offset.y == 0.0f &&
+        fake_offset.z == 0.0f)
+      return p;
+    const float ya = fake_yaw * 0.01745329f, pa = fake_pitch * 0.01745329f;
+    Quat r = QMul(Quat{0, std::sin(ya * 0.5f), 0, std::cos(ya * 0.5f)},
+                  Quat{std::sin(pa * 0.5f), 0, 0, std::cos(pa * 0.5f)});
     Quat q = QMul(r, Quat{p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w});
-    Vec3 t = QRot(r, Vec3{p.position.x, p.position.y, p.position.z});
-    return XrPosef{{q.x, q.y, q.z, q.w}, {t.x, t.y, t.z}};
+    Vec3 t = QRot(r, Vec3{p.position.x - pivot.x, p.position.y - pivot.y, p.position.z - pivot.z});
+    return XrPosef{{q.x, q.y, q.z, q.w},
+                   {t.x + pivot.x + fake_offset.x, t.y + pivot.y + fake_offset.y, t.z + pivot.z + fake_offset.z}};
   };
   v.head = ToPose(fake(Recentre(head.pose)));
   for (int i = 0; i < 2; ++i) {

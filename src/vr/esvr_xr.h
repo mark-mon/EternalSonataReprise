@@ -39,6 +39,7 @@ struct Settings {
   std::atomic<bool> hud{true};                                   // HUD of 3D frames on its own panel
   std::atomic<float> hud_distance{1.4f}, hud_width{1.4f}, hud_height{-0.1f};  // metres
   std::atomic<bool> hud_follow{false};                           // head-locked (else fixed in the room)
+  std::atomic<bool> water_refraction{true};                      // water shows the scene behind it
   std::atomic<float> menu_distance{1.0f}, menu_size{1.0f};      // settings menu panel: metres; 1 = 1 mm per pixel at 1 m
   bool from_file = false;
 };

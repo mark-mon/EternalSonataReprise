@@ -265,6 +265,8 @@ bool ClipActive() {
 
 bool HudSeparate() { return ClipActive() && Cfg().hud; }
 
+bool WaterRefractionOff() { return ClipActive() && !Cfg().water_refraction; }
+
 void ClipMatrix(float m[2][16]) {
   std::lock_guard<std::mutex> lock(g_clip.mutex);
   if (g_clip.valid)

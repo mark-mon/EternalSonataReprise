@@ -1624,12 +1624,17 @@ uint8_t g_water_bool_bank[d3d::kBoolLoopConstantBytes];
 const uint8_t* WaterCutBoolBank(const GuestDrawCall& call, bool* patched) {
   *patched = false;
   const uint8_t* bank = call.device + d3d::kBoolConstantShadow;
-  if (!WaterCutRefraction())
+  // VR's water_refraction = 0 cuts the bit on every draw: each of the 48 pixel shaders that read b134 uses it for
+  // exactly this (tf13, the scene copy, at the screen position), e.g. the bridge's stream (vs_040 + ps_019/057/072).
+  const bool vr_cut = esvr::WaterRefractionOff();
+  if (!WaterCutRefraction() && !vr_cut)
     return bank;
   const WaterProbeKnobs& knobs = WaterProbe();
   int vertex_slot = -1, pixel_slot = -1;
   GuestPipelineShaderSlots(call.pipeline, &vertex_slot, &pixel_slot);
-  if (vertex_slot != knobs.vertex_slot || pixel_slot != knobs.pixel_slot)
+  const bool probe_pair = WaterCutRefraction() && vertex_slot == knobs.vertex_slot &&
+                          pixel_slot == knobs.pixel_slot;
+  if (!probe_pair && !vr_cut)
     return bank;
 
   std::memcpy(g_water_bool_bank, bank, sizeof(g_water_bool_bank));
@@ -2215,6 +2220,10 @@ bool RecordGuestDraw(const GuestDrawCall& call) {
                                         scene_sprite, self_composite,
                                         screen_image && full_viewport) != nullptr;
   }
+  if (esvr::TraceFrame() && !FrameDrawingComposite())
+    esvr::Log("trace draw world vs %d ps %d camera %d target %ux%u count %u vp %d,%d %dx%d", draw_vertex_slot,
+              draw_pixel_slot, int(have_targets && FrameLastDrawIsWorldCamera()), target_width, target_height,
+              call.count, g_viewport.x, g_viewport.y, g_viewport.width, g_viewport.height);
   if (esvr::TraceFrame() && FrameDrawingComposite())
     esvr::Log("trace draw composite vs %d ps %d screen_composite %d self %d image %d fill %d sprite %d count %u "
               "vp %d,%d %dx%d", draw_vertex_slot, draw_pixel_slot, screen_composite, self_composite, screen_image,
@@ -2924,18 +2933,19 @@ bool RecordGuestDraw(const GuestDrawCall& call) {
   }
   if (!g_draw_state_cache.valid ||
       std::memcmp(g_draw_state_cache.words, draw_state, sizeof(draw_state)) != 0) {
-    const Allocation allocation = ArenaAllocate(device, kUploadAlignment);
+    constexpr uint64_t kDrawStateBytes =
+        (sizeof(draw_state) + kUploadAlignment - 1) / kUploadAlignment * kUploadAlignment;
+    const Allocation allocation = ArenaAllocate(device, kDrawStateBytes);
     if (!allocation) {
       Drop(kDropNoArena, "the draw state constants could not be uploaded");
       return false;
     }
     std::memcpy(allocation.cpu, draw_state, sizeof(draw_state));
-    std::memset(allocation.cpu + sizeof(draw_state), 0,
-                kUploadAlignment - sizeof(draw_state));
+    std::memset(allocation.cpu + sizeof(draw_state), 0, kDrawStateBytes - sizeof(draw_state));
     std::memcpy(g_draw_state_cache.words, draw_state, sizeof(draw_state));
     g_draw_state_cache.buffer = allocation.ref;
     g_draw_state_cache.valid = true;
-    g_constant_bytes += kUploadAlignment;
+    g_constant_bytes += kDrawStateBytes;
   }
   const RenderBufferReference alpha_test = g_draw_state_cache.buffer;
 
@@ -3037,6 +3047,9 @@ bool RecordGuestDraw(const GuestDrawCall& call) {
           ProfileZone fetch_zone(kPhaseFetchDecode);
           have_fetch = GetBoundTextureFetch(call.memory_base, stage, fetch, &sampler_state);
         }
+        if (have_fetch && esvr::TraceFrame() && IsWaterPairDraw(call))
+          esvr::Log("trace water tf%u 0x%08X %ux%u fmt %u", stage, fetch.base_address, fetch.width, fetch.height,
+                    fetch.format);
         // See WaterPinT12. Rewritten before the mirror lookup so the pinned
         // buffer is what is decoded as well as what is bound.
         if (have_fetch && stage == 12) {

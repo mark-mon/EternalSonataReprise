@@ -281,6 +281,9 @@ void DrawVrSettings() {
   ImGui::SliderInt("Resolution %##vr", &t.resolution, 50, 200, "%d%%");
   slider("World scale##vr", t.world_scale, 0.25f, 4.0f, "%.2f");
   check("Keep camera pitch##vr", t.keep_pitch);
+  check("Water refraction##vr", t.water_refraction);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("The scene seen through water. Off if it still looks wrong in the headset.");
 
   ImGui::SeparatorText("HUD panel");
   check("HUD on its own panel##vr", t.hud);
@@ -318,6 +321,7 @@ namespace esvr {
 bool ClipActive() { return false; }
 void UpdateSceneKind() {}
 bool HudSeparate() { return false; }
+bool WaterRefractionOff() { return false; }
 bool TraceFrame() { return false; }
 void RequestTrace() {}
 void Log(const char*, ...) {}

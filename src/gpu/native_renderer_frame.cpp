@@ -2507,6 +2507,10 @@ void FrameResolve(uint32_t source, uint8_t* memory_base, const TextureFetch& des
   }
 
   RippleNoteResolve(target, destination, destination_created);
+  if (esvr::TraceFrame())
+    esvr::Log("trace resolve %s tile %u host %ux%u -> 0x%08X %ux%u layer %d", is_depth ? "depth" : "colour",
+              target->base_tile, target->host_width, target->host_height, dest_address, dest_width, dest_height,
+              int(target->layer));
 
   ++g_resolves_copied;
   ++g_layer_resolves[size_t(target->layer)];

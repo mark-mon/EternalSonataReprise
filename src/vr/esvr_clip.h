@@ -13,6 +13,8 @@ bool ClipActive();
 // VR 3D frame with the HUD on its own panel: the renderer keeps the world image apart and starts the UI layer
 // transparent (native_renderer_frame.cpp CompositeWorldIntoLayer).
 bool HudSeparate();
+// VR with the water refraction turned off (vr_config water_refraction = 0): the renderer clears ps_058's b134.
+bool WaterRefractionOff();
 // Present thread, once per frame: field / battle (3D, re-aimed) or not (flat screen).
 void UpdateSceneKind();
 // The matrices for the draw being recorded, one per eye (rows; mono: both the same). Leaves `m` (identity) alone
